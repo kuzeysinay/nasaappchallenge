@@ -1,60 +1,92 @@
 import streamlit as st
 import pandas as pd
 import pydeck as pdk
+import numpy as np
 
-# CSV dosyasını okuma
-file_path = 'road-transportation_emissions_sources.csv'
-df = pd.read_csv(file_path)
+# Load the dataset
+df = pd.read_csv('solid-waste-disposal_emissions_sources.csv')
 
-# Türkiye verilerini filtreleme (iso3_country == 'TUR')
-df_turkey = df[df['iso3_country'] == 'TUR']
+# Extract relevant columns: latitude, longitude, CO2 emissions, year, and gas type
+df_filtered = df[['lat', 'lon', 'start_time', 'source_name', 'emissions_quantity', 'source_id', 'gas']]
 
-# İstanbul verilerini filtreleme (source_name veya coğrafi koordinatlara göre)
-df_istanbul = df_turkey[df_turkey['source_name'].str.contains('Istanbul', case=False, na=False)]
+# Filter for only 'co2e_100yr' gas type
+df_filtered = df_filtered[df_filtered['gas'] == 'co2e_100yr']
 
-# Latitude ve Longitude değerleri olmayan satırları kaldırma
-df_istanbul = df_istanbul.dropna(subset=['lat', 'lon'])
+# Calculate the number of unique disposal sites (unique source_ids)
+total_sites = df_filtered['source_id'].nunique()
 
-# Başlık
-st.markdown("<h1 style='color: black;'>İstanbul Karayolu Taşımacılığı Emisyonları</h1>", unsafe_allow_html=True)
+# Adding a year column for easier filtering
+df_filtered['year'] = pd.to_datetime(df_filtered['start_time']).dt.year
 
-# Emisyon miktarına göre boyutları ayarlama
-# Emisyon değerlerini normalize etmek için bir katsayı kullanıyoruz, böylece daireler çok büyük veya çok küçük olmaz
-df_istanbul['scaled_emissions'] = df_istanbul['emissions_quantity'] / df_istanbul['emissions_quantity'].max() * 1000  # Daire boyutu için ölçekleme
+# Sort by emissions_quantity to calculate ranks
+df_filtered['rank'] = df_filtered['emissions_quantity'].rank(method="min", ascending=False).astype(int)
 
-# Pydeck ile interaktif harita oluşturma
+# Set min and max radius for circle sizes
+min_radius = 2000  # Minimum size for circles
+max_radius = 10000  # Maximum size for circles
+
+# Apply log scale to emissions data and normalize between min_radius and max_radius
+df_filtered['emission_scaled'] = np.interp(
+    np.log1p(df_filtered['emissions_quantity']),  # Apply logarithmic scale
+    (np.log1p(df_filtered['emissions_quantity'].min()), np.log1p(df_filtered['emissions_quantity'].max())),
+    (min_radius, max_radius)
+)
+
+# Formatting emissions as a user-friendly string
+df_filtered['emissions_formatted'] = df_filtered.apply(lambda row: f"{int(row['emissions_quantity']):,}", axis=1)
+
+# Filtering for 2021 and 2022 data
+df_2021 = df_filtered[df_filtered['year'] == 2021]
+df_2022 = df_filtered[df_filtered['year'] == 2022]
+
+# Streamlit UI
+st.title("Landfill Emissions in Turkey (CO2e_100yr)")
+
+# Switch (radio) to toggle between years
+year = st.radio('Select Year', [2021, 2022])
+
+# Choose data based on the selected year
+if year == 2021:
+    data_to_display = df_2021
+else:
+    data_to_display = df_2022
+
+# Defining map view
+view_state = pdk.ViewState(
+    latitude=data_to_display['lat'].mean(),
+    longitude=data_to_display['lon'].mean(),
+    zoom=6
+)
+
+# Layer to display points with sizes based on CO2 emissions and new color
 layer = pdk.Layer(
     'ScatterplotLayer',
-    data=df_istanbul,
-    get_position=['lon', 'lat'],
-    get_radius='scaled_emissions',  # Emisyon miktarına göre boyut
-    get_color=[255, 140, 0],  # Noktaların rengi (turuncu)
-    pickable=True,  # Tıklanabilir olmasını sağlıyoruz
+    data=data_to_display,
+    get_position='[lon, lat]',
+    get_radius='emission_scaled',  # Map the radius between min and max values
+    get_color=[170, 170, 70, 140],  # Nauseating yellow-green color with some transparency
+    pickable=True
 )
 
-# Tıklama ile açılacak bilgi penceresi
-tooltip = {
-    "html": "<b>{source_name}</b><br/>Emissions: {emissions_quantity} T",
-    "style": {"backgroundColor": "gray", "color": "white"}
-}
-
-# Harita görünümü
-view_state = pdk.ViewState(
-    latitude=df_istanbul['lat'].mean(),
-    longitude=df_istanbul['lon'].mean(),
-    zoom=10,
-    
-)
-
-# Pydeck haritasını oluşturma
+# Render map with emission info in the tooltip, displaying the formatted emissions and rank
 r = pdk.Deck(
-    layers=[layer],
-    initial_view_state=view_state,
-    tooltip=tooltip
+    layers=[layer], 
+    initial_view_state=view_state, 
+    tooltip={
+        "html": """
+        <div style="background-color: rgb(170, 170, 70); padding: 5px; border-radius: 5px; width: fit-content;">
+            <b style="color: #fff">Disposal site</b>
+        </div>
+        <b style="color: #fff">{source_name}</b><br>
+        <div style="font-size: 24px; font-weight: bold; color: #fff;">
+            {emissions_formatted}t CO<sub>2</sub>e100 in {year}
+        </div>
+        <div style="font-size: 16px; color: grey;">
+            {rank} out of """ + str(total_sites) + """ disposal sites
+        </div>
+        """,
+        "style": {"color": "black"}
+    }
 )
 
-# Haritayı streamlit'te gösterme
 st.pydeck_chart(r)
-
-# Opsiyonel: Haritanın altına veri tablosu gösterme
-st.write(df_istanbul[['source_name', 'lat', 'lon', 'emissions_quantity', 'scaled_emissions']])
